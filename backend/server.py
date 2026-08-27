@@ -528,12 +528,18 @@ async def update_user(user_id: str, body: UserUpdate, request: Request, user: di
     existing = await db.users.find_one({"id": user_id})
     if not existing:
         raise HTTPException(404, "Not found")
+    # SECURITY: Developer account is immutable to non-developers
+    if existing.get("role") == "developer" and user.get("role") != "developer":
+        raise HTTPException(403, "Developer account cannot be modified by non-developer role")
     upd = {k: v for k, v in body.model_dump().items() if v is not None}
-    # Only admins can change role/permissions/status
+    # Only admins can change role/permissions/status; developers preserve their own protections
     if not has_permission(user, "members", "manage"):
         upd.pop("role", None)
         upd.pop("permissions", None)
         upd.pop("status", None)
+    # Even with manage permission, only a developer can grant/revoke developer role
+    if upd.get("role") == "developer" and user.get("role") != "developer":
+        raise HTTPException(403, "Only a developer can assign developer role")
     upd["updated_at"] = now_iso()
     await db.users.update_one({"id": user_id}, {"$set": upd})
     await audit(user, "UPDATE", "members", user_id, {k: existing.get(k) for k in upd}, upd,
@@ -547,6 +553,9 @@ async def delete_user(user_id: str, request: Request, user: dict = Depends(get_c
     require_permission(user, "members", "delete")
     if user_id == user["id"]:
         raise HTTPException(400, "Cannot delete self")
+    target = await db.users.find_one({"id": user_id})
+    if target and target.get("role") == "developer" and user.get("role") != "developer":
+        raise HTTPException(403, "Developer account cannot be deleted by non-developer role")
     await db.users.update_one({"id": user_id}, {"$set": {"status": "disabled", "updated_at": now_iso()}})
     await audit(user, "DELETE", "members", user_id, None, None, request.client.host if request.client else "")
     return {"ok": True}
@@ -2404,9 +2413,9 @@ async def get_branding(user: dict = Depends(get_current_user)):
 
 @api.put("/branding")
 async def put_branding(body: dict = Body(...), user: dict = Depends(get_current_user)):
-    # Developer or admin
-    if user.get("role") not in ("admin", "developer") and not has_permission(user, "branding", "manage"):
-        raise HTTPException(403, "Forbidden")
+    # SECURITY: Branding is Developer-only unless explicit permission granted
+    if user.get("role") != "developer" and not has_permission(user, "branding", "manage"):
+        raise HTTPException(403, "Branding is developer-only")
     body["updated_at"] = now_iso()
     await db.settings.update_one({"_id": "app"}, {"$set": body}, upsert=True)
     await audit(user, "UPDATE", "branding", "app", None, body)
