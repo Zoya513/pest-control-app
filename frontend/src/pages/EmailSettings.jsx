@@ -12,6 +12,30 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { toast } from "sonner";
 import { Mail, Send, KeyRound, FileText, Zap } from "lucide-react";
 
+function TestWA() {
+  const [to, setTo] = useState("");
+  const [msg, setMsg] = useState("Test WA from PestOps Pro");
+  const [busy, setBusy] = useState(false);
+  const go = async () => {
+    if (!to) return toast.error("Nomor WA tujuan wajib diisi");
+    setBusy(true);
+    try {
+      const { data } = await api.post("/wa/test", { to, message: msg });
+      toast.success(`WA sent (SID ${data.sid.slice(0, 10)}...)`);
+    } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="space-y-2">
+      <Label>Recipient (E.164, e.g. +628123456789)</Label>
+      <Input value={to} onChange={(e) => setTo(e.target.value)} placeholder="+628123456789" data-testid="wa-test-to" />
+      <Label>Message</Label>
+      <Textarea rows={2} value={msg} onChange={(e) => setMsg(e.target.value)} data-testid="wa-test-msg" />
+      <Button onClick={go} disabled={busy} className="bg-emerald-600 hover:bg-emerald-700 text-white" data-testid="wa-test-send"><Send className="w-4 h-4 mr-1" />Send Test WhatsApp</Button>
+    </div>
+  );
+}
+
 const PLACEHOLDER_HELP = (
   <div className="text-xs text-muted-foreground mt-1">
     Placeholders: <code className="text-primary">{"{client_name}"}</code> <code className="text-primary">{"{period}"}</code> <code className="text-primary">{"{report_number}"}</code> <code className="text-primary">{"{company_name}"}</code> <code className="text-primary">{"{technician}"}</code>
@@ -59,6 +83,7 @@ export default function EmailSettings() {
       <Tabs defaultValue="smtp" className="space-y-4">
         <TabsList>
           <TabsTrigger value="smtp" data-testid="tab-smtp"><KeyRound className="w-4 h-4 mr-1" />SMTP</TabsTrigger>
+          <TabsTrigger value="whatsapp" data-testid="tab-whatsapp"><Send className="w-4 h-4 mr-1" />WhatsApp</TabsTrigger>
           <TabsTrigger value="templates" data-testid="tab-templates"><FileText className="w-4 h-4 mr-1" />Templates</TabsTrigger>
           <TabsTrigger value="automation" data-testid="tab-automation"><Zap className="w-4 h-4 mr-1" />Automation</TabsTrigger>
           <TabsTrigger value="test" data-testid="tab-test"><Send className="w-4 h-4 mr-1" />Test</TabsTrigger>
@@ -66,9 +91,10 @@ export default function EmailSettings() {
 
         <TabsContent value="smtp">
           <Card className="p-5 space-y-3">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-3 flex-wrap">
+              <label className="flex items-center gap-2 text-sm"><Switch checked={!!s.email_enabled} onCheckedChange={(v) => setS({ ...s, email_enabled: v })} disabled={!isEditor} data-testid="email-enabled" /> Email delivery enabled globally</label>
               <Badge className={s.smtp_password_set ? "bg-emerald-500/10 text-emerald-500 border-emerald-500/30" : "bg-amber-500/10 text-amber-500 border-amber-500/30"}>
-                {s.smtp_password_set ? "SMTP Configured" : "Not Configured (using Emergent fallback)"}
+                {s.smtp_password_set ? "SMTP Configured" : "Not Configured (Emergent fallback)"}
               </Badge>
             </div>
             <div className="grid grid-cols-2 gap-3">
@@ -92,6 +118,26 @@ export default function EmailSettings() {
           </Card>
         </TabsContent>
 
+        <TabsContent value="whatsapp">
+          <Card className="p-5 space-y-3">
+            <div className="flex items-center gap-3 flex-wrap">
+              <label className="flex items-center gap-2 text-sm"><Switch checked={!!s.wa_enabled} onCheckedChange={(v) => setS({ ...s, wa_enabled: v })} disabled={!isEditor} data-testid="wa-enabled" /> WhatsApp delivery enabled</label>
+              <Badge className={s.wa_auth_token_set ? "bg-emerald-500/10 text-emerald-500 border-emerald-500/30" : "bg-amber-500/10 text-amber-500 border-amber-500/30"}>
+                {s.wa_auth_token_set ? "Twilio Configured" : "Not Configured"}
+              </Badge>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div><Label>Twilio Account SID</Label><Input value={s.wa_account_sid || ""} onChange={(e) => setS({ ...s, wa_account_sid: e.target.value })} placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" disabled={!isEditor} data-testid="wa-sid" /></div>
+              <div><Label>Auth Token {s.wa_auth_token_set && <span className="text-xs text-emerald-500">(set — leave blank to keep)</span>}</Label><Input type="password" value={s.wa_auth_token || ""} onChange={(e) => setS({ ...s, wa_auth_token: e.target.value })} placeholder={s.wa_auth_token_set ? "•••••••• (keep)" : "32-char hex token"} disabled={!isEditor} data-testid="wa-token" /></div>
+              <div className="col-span-2"><Label>WhatsApp Sender Number</Label><Input value={s.wa_from || ""} onChange={(e) => setS({ ...s, wa_from: e.target.value })} placeholder="whatsapp:+14155238886 (sandbox) or your approved number" disabled={!isEditor} data-testid="wa-from" /></div>
+            </div>
+            <div className="p-3 rounded-md bg-muted text-xs text-muted-foreground">
+              <b className="text-primary">Sandbox tip:</b> Twilio Sandbox uses <code>whatsapp:+14155238886</code>. Recipients must first join by sending a WhatsApp message with your unique join code (find it at <a className="text-primary underline" href="https://console.twilio.com/us1/develop/sms/try-it-out/whatsapp-learn" target="_blank" rel="noreferrer">Twilio Console</a>) to that number. For production, use an approved WhatsApp Business Number.
+            </div>
+            {isEditor && <Button onClick={save} className="bg-primary text-primary-foreground" data-testid="save-wa"><Send className="w-4 h-4 mr-1" />Save WhatsApp Settings</Button>}
+          </Card>
+        </TabsContent>
+
         <TabsContent value="templates">
           <Card className="p-5 space-y-4">
             <div>
@@ -110,6 +156,14 @@ export default function EmailSettings() {
               <Textarea rows={10} value={s.mr_body_template || ""} onChange={(e) => setS({ ...s, mr_body_template: e.target.value })} disabled={!isEditor} data-testid="mr-body-tpl" />
               {PLACEHOLDER_HELP}
             </div>
+            <div className="border-t border-border pt-4">
+              <div className="text-sm font-semibold mb-1">WhatsApp — Service Report</div>
+              <Textarea rows={3} value={s.wa_sr_template || ""} onChange={(e) => setS({ ...s, wa_sr_template: e.target.value })} disabled={!isEditor} data-testid="wa-sr-tpl" />
+              {PLACEHOLDER_HELP}
+              <div className="text-sm font-semibold mb-1 mt-3">WhatsApp — Monthly Report</div>
+              <Textarea rows={3} value={s.wa_mr_template || ""} onChange={(e) => setS({ ...s, wa_mr_template: e.target.value })} disabled={!isEditor} data-testid="wa-mr-tpl" />
+              {PLACEHOLDER_HELP}
+            </div>
             {isEditor && <Button onClick={save} className="bg-primary text-primary-foreground" data-testid="save-templates">Save Templates</Button>}
           </Card>
         </TabsContent>
@@ -119,12 +173,19 @@ export default function EmailSettings() {
             <div className="flex items-center gap-3">
               <Switch checked={!!s.auto_monthly_send} onCheckedChange={(v) => setS({ ...s, auto_monthly_send: v })} disabled={!isEditor} data-testid="auto-monthly" />
               <div>
-                <Label className="text-base">Auto-send Monthly Report</Label>
-                <div className="text-xs text-muted-foreground">System automatically sends previous-month Monthly Report to all active clients on the 1st of each month at 08:00 UTC.</div>
+                <Label className="text-base">Auto-send Monthly Report via Email</Label>
+                <div className="text-xs text-muted-foreground">System automatically emails previous-month Monthly Report to all active clients on the 1st of each month.</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 border-t border-border pt-4">
+              <Switch checked={!!s.wa_auto_monthly} onCheckedChange={(v) => setS({ ...s, wa_auto_monthly: v })} disabled={!isEditor} data-testid="auto-wa-monthly" />
+              <div>
+                <Label className="text-base">Auto-notify Monthly Report via WhatsApp</Label>
+                <div className="text-xs text-muted-foreground">Sends a WhatsApp summary to each client's phone number on the 1st of each month (uses phone field on customer record).</div>
               </div>
             </div>
             <div className="p-3 rounded-md bg-muted text-xs text-muted-foreground">
-              <b className="text-primary">How it works:</b> A scheduled cron calls the backend endpoint <code>POST /api/cron/auto-monthly-send</code>. If the toggle is ON, all active customers with a saved email receive the previous-month Monthly Report generated with your latest branding + template + SMTP configuration. All sends are logged to the Audit Log.
+              <b className="text-primary">How it works:</b> A scheduled cron calls <code>POST /api/cron/auto-monthly-send</code>. If Email toggle is ON, PDF report is emailed. If WhatsApp toggle is ON, a message is sent. Toggles are independent — you can enable one, both, or neither. Manual send always works regardless of automation state.
             </div>
             {isEditor && <Button onClick={save} className="bg-primary text-primary-foreground" data-testid="save-automation">Save Automation</Button>}
           </Card>
@@ -132,10 +193,17 @@ export default function EmailSettings() {
 
         <TabsContent value="test">
           <Card className="p-5 space-y-3">
-            <Label>Send Test Email To</Label>
-            <Input value={testTo} onChange={(e) => setTestTo(e.target.value)} placeholder="your@email.com" data-testid="test-to" />
-            <Button onClick={test} className="bg-teal-600 hover:bg-teal-700 text-white" data-testid="test-send"><Send className="w-4 h-4 mr-1" />Send Test</Button>
-            <div className="text-xs text-muted-foreground">Verifies your SMTP config end-to-end. If SMTP fails, the system falls back to Emergent-managed email and reports which route was used.</div>
+            <div>
+              <div className="text-sm font-semibold mb-2">Test Email</div>
+              <Label>Send To</Label>
+              <Input value={testTo} onChange={(e) => setTestTo(e.target.value)} placeholder="your@email.com" data-testid="test-to" />
+              <Button onClick={test} className="mt-2 bg-teal-600 hover:bg-teal-700 text-white" data-testid="test-send"><Send className="w-4 h-4 mr-1" />Send Test Email</Button>
+            </div>
+            <div className="border-t border-border pt-4">
+              <div className="text-sm font-semibold mb-2">Test WhatsApp</div>
+              <TestWA />
+            </div>
+            <div className="text-xs text-muted-foreground">Test buttons verify credentials end-to-end. Failures return HTTP 502 with the provider error for easy diagnosis.</div>
           </Card>
         </TabsContent>
       </Tabs>

@@ -33,8 +33,11 @@ from reports import (
 )
 from emailer import send_email_with_attachments, render_report_email, EMAIL_FROM_NAME
 from smtp_sender import send_via_smtp, render_template, body_to_html, DEFAULT_SR_SUBJECT, DEFAULT_SR_BODY, DEFAULT_MR_SUBJECT, DEFAULT_MR_BODY
+from wa_sender import send_whatsapp, DEFAULT_SR_WA, DEFAULT_MR_WA
 import httpx
 import zipfile
+import csv
+import io as _io
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("pestops")
@@ -1823,6 +1826,110 @@ async def monthly_report_pdf(customer_id: str, month: str, include_srs: bool = T
                              headers={"Content-Disposition": f"attachment; filename=monthly-{customer_id[:8]}-{month}-full.pdf"})
 
 
+@api.get("/monthly-report/excel")
+async def monthly_report_excel(customer_id: str, month: str, user: dict = Depends(get_current_user)):
+    require_permission(user, "monthly_reports", "export")
+    payload = await monthly_report(customer_id=customer_id, month=month, user=user)
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Summary"
+    c = payload["customer"]
+    ws.append(["MONTHLY REPORT", payload["month"]])
+    ws.append(["Company", c.get("company_name", "")])
+    ws.append(["Project", c.get("project_name", "")])
+    ws.append(["Address", c.get("address", "")])
+    ws.append([])
+    ws.append(["Historical Pest Findings"])
+    ws.append(["Month", "Fly (F)", "Mosquito (M)", "Cockroach (C)", "Rodent (R)", "Ant (A)", "Other (O)", "Total"])
+    for h in payload["historical_pest"]:
+        ws.append([h["month"], h["F"], h["M"], h["C"], h["R"], h["A"], h["O"], h["total"]])
+    ws2 = wb.create_sheet("Work Realization")
+    ws2.append(["Date", "Technician", "Scope", "Recommendation", "Pest Description"])
+    for s in payload["service_reports"]:
+        ws2.append([s.get("date", ""), s.get("technician_name", ""),
+                    s.get("scope_of_area", ""), s.get("recommendation", ""),
+                    s.get("pest_description", "")])
+    ws3 = wb.create_sheet("Attendance")
+    ws3.append(["Technician", "Date", "Check-in", "Check-out", "Working Hours", "Address"])
+    for a in payload["attendance"]:
+        ws3.append([a.get("user_name", ""), a.get("date", ""),
+                    (a.get("timestamp") or "")[11:19],
+                    (a.get("checkout_timestamp") or "")[11:19] or "-",
+                    a.get("working_hours") or "-", a.get("address", "")])
+    buf = io.BytesIO(); wb.save(buf)
+    return StreamingResponse(io.BytesIO(buf.getvalue()),
+                             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f"attachment; filename=monthly-{customer_id[:8]}-{month}.xlsx"})
+
+
+@api.get("/monthly-report/pptx")
+async def monthly_report_pptx(customer_id: str, month: str, user: dict = Depends(get_current_user)):
+    require_permission(user, "monthly_reports", "export")
+    payload = await monthly_report(customer_id=customer_id, month=month, user=user)
+    from pptx import Presentation
+    from pptx.util import Inches, Pt
+    from pptx.dml.color import RGBColor
+    brand = await _get_brand()
+    prs = Presentation()
+    # Cover
+    s1 = prs.slides.add_slide(prs.slide_layouts[0])
+    s1.shapes.title.text = "MONTHLY REPORT"
+    s1.placeholders[1].text = f"{payload['customer'].get('company_name','')} — {payload['month']}"
+    # Client info
+    s2 = prs.slides.add_slide(prs.slide_layouts[1])
+    s2.shapes.title.text = "Client Information"
+    c = payload["customer"]
+    tf = s2.placeholders[1].text_frame
+    tf.text = f"Company: {c.get('company_name','')}"
+    for line in [f"Project: {c.get('project_name','') or '-'}",
+                 f"Address: {c.get('address','')}",
+                 f"Contract Start: {c.get('contract_start','') or '-'}",
+                 f"Period: {payload['month']}"]:
+        p = tf.add_paragraph(); p.text = line
+    # Historical
+    s3 = prs.slides.add_slide(prs.slide_layouts[5])
+    s3.shapes.title.text = "Pest Findings — Historical"
+    left = Inches(0.5); top = Inches(1.4); width = Inches(9); height = Inches(4)
+    rows = len(payload["historical_pest"]) + 1
+    tbl = s3.shapes.add_table(rows, 8, left, top, width, height).table
+    for j, h in enumerate(["Month", "F", "M", "C", "R", "A", "O", "Total"]):
+        tbl.cell(0, j).text = h
+    for i, h in enumerate(payload["historical_pest"], start=1):
+        tbl.cell(i, 0).text = h["month"]
+        for j, k in enumerate(["F", "M", "C", "R", "A", "O", "total"], start=1):
+            tbl.cell(i, j).text = str(h[k])
+    # Work Realization
+    s4 = prs.slides.add_slide(prs.slide_layouts[5])
+    s4.shapes.title.text = f"Work Realization ({payload['month']})"
+    if payload["service_reports"]:
+        rows = min(len(payload["service_reports"]) + 1, 12)
+        tbl2 = s4.shapes.add_table(rows, 3, Inches(0.5), Inches(1.4), Inches(9), Inches(4)).table
+        for j, h in enumerate(["Date", "Technician", "Scope"]):
+            tbl2.cell(0, j).text = h
+        for i, s in enumerate(payload["service_reports"][:rows - 1], start=1):
+            tbl2.cell(i, 0).text = s.get("date", "")
+            tbl2.cell(i, 1).text = s.get("technician_name", "")
+            tbl2.cell(i, 2).text = (s.get("scope_of_area", "") or "")[:60]
+    # Attendance
+    s5 = prs.slides.add_slide(prs.slide_layouts[5])
+    s5.shapes.title.text = "Attendance"
+    if payload["attendance"]:
+        rows = min(len(payload["attendance"]) + 1, 15)
+        tbl3 = s5.shapes.add_table(rows, 4, Inches(0.5), Inches(1.4), Inches(9), Inches(4.5)).table
+        for j, h in enumerate(["Technician", "Date", "Check-in", "Hours"]):
+            tbl3.cell(0, j).text = h
+        for i, a in enumerate(payload["attendance"][:rows - 1], start=1):
+            tbl3.cell(i, 0).text = a.get("user_name", "")
+            tbl3.cell(i, 1).text = a.get("date", "")
+            tbl3.cell(i, 2).text = (a.get("timestamp") or "")[11:19]
+            tbl3.cell(i, 3).text = str(a.get("working_hours") or "-")
+    buf = io.BytesIO(); prs.save(buf)
+    return StreamingResponse(io.BytesIO(buf.getvalue()),
+                             media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                             headers={"Content-Disposition": f"attachment; filename=monthly-{customer_id[:8]}-{month}.pptx"})
+
+
 # ================= BULK ZIP EXPORT =================
 @api.get("/service-reports/export/zip")
 async def sr_bulk_zip(customer_id: Optional[str] = None,
@@ -1869,15 +1976,19 @@ async def _email_config() -> dict:
 
 
 def _mask_pw(cfg: dict) -> dict:
-    """Remove SMTP password from responses; expose only whether one is set."""
-    out = {k: v for k, v in cfg.items() if k not in ("_id", "smtp_password")}
+    """Remove SMTP password & Twilio token from responses; expose only whether they are set."""
+    out = {k: v for k, v in cfg.items() if k not in ("_id", "smtp_password", "wa_auth_token")}
     out["smtp_password_set"] = bool(cfg.get("smtp_password"))
+    out["wa_auth_token_set"] = bool(cfg.get("wa_auth_token"))
     return out
 
 
 async def _smart_send(*, to: str, subject: str, plain_body: str, attachments: list = None):
-    """Try Custom SMTP first (if configured), else fallback to Emergent Resend."""
+    """Try Custom SMTP first (if configured), else fallback to Emergent Resend.
+    Raises HTTPException if email disabled globally."""
     cfg = await _email_config()
+    if cfg.get("email_enabled") is False:
+        raise HTTPException(status_code=409, detail="Email delivery disabled in settings")
     brand = await _get_brand()
     html = body_to_html(plain_body, signature=cfg.get("signature", ""))
 
@@ -1926,6 +2037,14 @@ async def get_email_settings(user: dict = Depends(get_current_user)):
     cfg.setdefault("mr_body_template", DEFAULT_MR_BODY)
     cfg.setdefault("auto_monthly_send", False)
     cfg.setdefault("auto_monthly_day", 1)  # send on 1st of month
+    cfg.setdefault("email_enabled", True)
+    # WhatsApp defaults
+    cfg.setdefault("wa_enabled", False)
+    cfg.setdefault("wa_account_sid", "")
+    cfg.setdefault("wa_from", os.environ.get("TWILIO_WA_FROM", "whatsapp:+14155238886"))
+    cfg.setdefault("wa_sr_template", DEFAULT_SR_WA)
+    cfg.setdefault("wa_mr_template", DEFAULT_MR_WA)
+    cfg.setdefault("wa_auto_monthly", False)
     return _mask_pw(cfg)
 
 
@@ -1938,11 +2057,15 @@ async def put_email_settings(body: dict = Body(...), user: dict = Depends(get_cu
                "from_email", "from_name", "reply_to", "signature",
                "sr_subject_template", "sr_body_template",
                "mr_subject_template", "mr_body_template",
-               "auto_monthly_send", "auto_monthly_day"}
+               "auto_monthly_send", "auto_monthly_day", "email_enabled",
+               # WhatsApp
+               "wa_enabled", "wa_account_sid", "wa_auth_token", "wa_from",
+               "wa_sr_template", "wa_mr_template", "wa_auto_monthly"}
     upd = {k: v for k, v in body.items() if k in ALLOWED}
-    # Don't overwrite password with empty string or None (keep existing)
-    if "smtp_password" in upd and (upd["smtp_password"] in ("", None)):
-        upd.pop("smtp_password")
+    # Don't overwrite password/token with empty or null (keep existing)
+    for secret_key in ("smtp_password", "wa_auth_token"):
+        if secret_key in upd and (upd[secret_key] in ("", None)):
+            upd.pop(secret_key)
     upd["updated_at"] = now_iso()
     await db.settings.update_one({"_id": "email"}, {"$set": upd}, upsert=True)
     await audit(user, "UPDATE", "settings", "email", None, {k: v for k, v in upd.items() if k != "smtp_password"})
@@ -1965,8 +2088,152 @@ async def test_email(body: dict = Body(...), user: dict = Depends(get_current_us
     except HTTPException:
         raise
     except Exception as e:
-        # Hard failure — return 502 so monitors can distinguish
         raise HTTPException(status_code=502, detail=f"Email send failed: {str(e)}")
+
+
+# ================= WHATSAPP =================
+async def _wa_send(to: str, body: str) -> str:
+    cfg = await _email_config()
+    if not cfg.get("wa_enabled"):
+        raise HTTPException(status_code=409, detail="WhatsApp disabled in settings")
+    sid = cfg.get("wa_account_sid") or os.environ.get("TWILIO_ACCOUNT_SID", "")
+    token = cfg.get("wa_auth_token") or os.environ.get("TWILIO_AUTH_TOKEN", "")
+    wa_from = cfg.get("wa_from") or os.environ.get("TWILIO_WA_FROM", "")
+    if not (sid and token and wa_from):
+        raise HTTPException(status_code=400, detail="WhatsApp credentials missing")
+    return await send_whatsapp(account_sid=sid, auth_token=token, from_wa=wa_from,
+                               to=to, body=body)
+
+
+@api.post("/wa/test")
+async def test_wa(body: dict = Body(...), user: dict = Depends(get_current_user)):
+    if user.get("role") not in ("admin", "developer"):
+        raise HTTPException(403, "Forbidden")
+    to = body.get("to")
+    if not to:
+        raise HTTPException(400, "recipient 'to' required (e.g. +6281234567890)")
+    brand = await _get_brand()
+    msg = body.get("message") or f"Test WhatsApp from {brand['company_name']} — PestOps Pro."
+    try:
+        sid = await _wa_send(to, msg)
+        return {"ok": True, "sid": sid}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"WhatsApp send failed: {e}")
+
+
+class SendWAReport(BaseModel):
+    to: Optional[str] = None
+    message: Optional[str] = None
+
+
+@api.post("/service-reports/{sid}/whatsapp")
+async def wa_single_sr(sid: str, body: SendWAReport, user: dict = Depends(get_current_user)):
+    require_permission(user, "email", "create")
+    sr = await db.service_reports.find_one({"id": sid}, {"_id": 0})
+    if not sr:
+        raise HTTPException(404, "Not found")
+    cust = await db.customers.find_one({"id": sr["customer_id"]}, {"_id": 0}) or {}
+    to = body.to or cust.get("phone")
+    if not to:
+        raise HTTPException(400, "No WhatsApp number on customer; provide 'to'.")
+    cfg = await _email_config()
+    brand = await _get_brand()
+    ctx = {"client_name": cust.get("company_name", ""), "period": sr.get("date", ""),
+           "report_number": sr.get("report_number", ""), "company_name": brand["company_name"],
+           "technician": ""}
+    msg = body.message or render_template(cfg.get("wa_sr_template", DEFAULT_SR_WA), **ctx)
+    try:
+        twilio_sid = await _wa_send(to, msg)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"WhatsApp send failed: {e}")
+    await audit(user, "WHATSAPP", "service_reports", sid, None, {"to": to, "twilio_sid": twilio_sid})
+    return {"ok": True, "sid": twilio_sid, "recipient": to}
+
+
+@api.post("/monthly-report/whatsapp")
+async def wa_monthly(customer_id: str = Body(...), month: str = Body(...),
+                     body: SendWAReport = Body(...), user: dict = Depends(get_current_user)):
+    require_permission(user, "email", "create")
+    cust = await db.customers.find_one({"id": customer_id}, {"_id": 0})
+    if not cust:
+        raise HTTPException(404, "Customer not found")
+    to = body.to or cust.get("phone")
+    if not to:
+        raise HTTPException(400, "No WhatsApp number available")
+    cfg = await _email_config()
+    brand = await _get_brand()
+    ctx = {"client_name": cust.get("company_name", ""), "period": month, "company_name": brand["company_name"]}
+    msg = body.message or render_template(cfg.get("wa_mr_template", DEFAULT_MR_WA), **ctx)
+    try:
+        twilio_sid = await _wa_send(to, msg)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"WhatsApp send failed: {e}")
+    await audit(user, "WHATSAPP", "monthly_reports", f"{customer_id}-{month}", None, {"to": to, "twilio_sid": twilio_sid})
+    return {"ok": True, "sid": twilio_sid, "recipient": to}
+
+
+# ================= CSV IMPORT =================
+@api.post("/customers/import-csv")
+async def customers_import_csv(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+    require_permission(user, "customers", "create")
+    if not (file.filename or "").lower().endswith(".csv"):
+        raise HTTPException(400, "CSV file required")
+    raw = (await file.read()).decode("utf-8-sig", errors="ignore")
+    reader = csv.DictReader(_io.StringIO(raw))
+    created, skipped, errors = 0, 0, []
+    for i, row in enumerate(reader, start=2):
+        try:
+            name = (row.get("company_name") or row.get("Company") or "").strip()
+            if not name:
+                skipped += 1
+                continue
+            if await db.customers.find_one({"company_name": name}):
+                skipped += 1
+                continue
+            lat, lng = None, None
+            try:
+                lat = float(row["latitude"]) if row.get("latitude") else None
+                lng = float(row["longitude"]) if row.get("longitude") else None
+            except ValueError:
+                pass
+            doc = {
+                "id": uid(),
+                "company_name": name,
+                "project_name": row.get("project_name", "") or row.get("project", ""),
+                "contact_person": row.get("contact_person", "") or row.get("contact", ""),
+                "phone": row.get("phone", ""),
+                "email": row.get("email", ""),
+                "address": row.get("address", ""),
+                "location_text": row.get("location_text", ""),
+                "latitude": lat, "longitude": lng,
+                "category": row.get("category", "Regular"),
+                "contract_start": row.get("contract_start") or None,
+                "contract_end": row.get("contract_end") or None,
+                "status": "active",
+                "registration_date": now_iso(),
+                "created_by": user["id"],
+                "created_at": now_iso(), "updated_at": now_iso(),
+            }
+            await db.customers.insert_one(doc)
+            created += 1
+        except Exception as e:
+            errors.append({"row": i, "error": str(e)[:120]})
+    await audit(user, "IMPORT", "customers", f"csv-{created}", None, {"created": created, "skipped": skipped, "errors": len(errors)})
+    return {"created": created, "skipped": skipped, "errors": errors}
+
+
+@api.get("/customers/import-template.csv")
+async def customers_import_template(user: dict = Depends(get_current_user)):
+    csv_txt = "company_name,project_name,contact_person,phone,email,address,latitude,longitude,category,contract_start,contract_end\n"
+    csv_txt += "PT. Contoh,Head Office,Budi,+628123456789,contoh@example.com,Jl. Sudirman Jakarta,-6.2088,106.8456,Corporate,2026-01-01,2026-12-31\n"
+    return Response(content=csv_txt, media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=customers_template.csv"})
 
 
 @api.post("/service-reports/{sid}/email")
@@ -2060,8 +2327,10 @@ async def cron_auto_monthly(request: Request):
     if not expected.endswith(" ") and auth != expected:
         raise HTTPException(401, "Unauthorized")
     cfg = await _email_config()
-    if not cfg.get("auto_monthly_send"):
-        return {"ok": True, "skipped": "auto_monthly_send disabled"}
+    do_email = cfg.get("auto_monthly_send") and cfg.get("email_enabled", True)
+    do_wa = cfg.get("wa_auto_monthly") and cfg.get("wa_enabled")
+    if not do_email and not do_wa:
+        return {"ok": True, "skipped": "email/wa auto disabled"}
     # Compute previous month
     today = date.today()
     if today.month == 1:
@@ -2073,7 +2342,7 @@ async def cron_auto_monthly(request: Request):
     import asyncio
 
     async def _job():
-        customers = await db.customers.find({"status": "active", "email": {"$nin": ["", None]}}, {"_id": 0}).to_list(500)
+        customers = await db.customers.find({"status": "active"}, {"_id": 0}).to_list(500)
         for c in customers:
             try:
                 # Reuse email endpoint logic by simulating "admin"
@@ -2092,10 +2361,20 @@ async def cron_auto_monthly(request: Request):
                         pass
                 pdf = _generate_monthly_pdf(payload, brand_full)
                 ctx = {"client_name": c.get("company_name", ""), "period": period, "company_name": brand["company_name"]}
-                subject = render_template(cfg.get("mr_subject_template", DEFAULT_MR_SUBJECT), **ctx)
-                plain = render_template(cfg.get("mr_body_template", DEFAULT_MR_BODY), **ctx)
-                await _smart_send(to=c["email"], subject=subject, plain_body=plain,
-                                  attachments=[{"filename": f"monthly-{period}.pdf", "content": pdf}])
+                if do_email and c.get("email"):
+                    subject = render_template(cfg.get("mr_subject_template", DEFAULT_MR_SUBJECT), **ctx)
+                    plain = render_template(cfg.get("mr_body_template", DEFAULT_MR_BODY), **ctx)
+                    try:
+                        await _smart_send(to=c["email"], subject=subject, plain_body=plain,
+                                          attachments=[{"filename": f"monthly-{period}.pdf", "content": pdf}])
+                    except Exception as ee:
+                        logger.warning(f"Auto-email {c.get('company_name')} failed: {ee}")
+                if do_wa and c.get("phone"):
+                    try:
+                        msg = render_template(cfg.get("wa_mr_template", DEFAULT_MR_WA), **ctx)
+                        await _wa_send(c["phone"], msg)
+                    except Exception as we:
+                        logger.warning(f"Auto-WA {c.get('company_name')} failed: {we}")
                 await db.audit_logs.insert_one({
                     "id": uid(), "user_id": "cron", "user_name": "Scheduler",
                     "action": "AUTO_EMAIL", "module": "monthly_reports",

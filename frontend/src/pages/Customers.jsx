@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Plus, Search, Building2, ExternalLink } from "lucide-react";
+import { Plus, Search, Building2, ExternalLink, Upload, Download } from "lucide-react";
 import { toast } from "sonner";
 import AddressAutocomplete from "@/components/AddressAutocomplete";
 
@@ -16,6 +16,8 @@ export default function Customers() {
   const [list, setList] = useState([]);
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importResult, setImportResult] = useState(null);
   const empty = { company_name: "", project_name: "", contact_person: "", phone: "", email: "", address: "", location_text: "", latitude: null, longitude: null, category: "Regular", contract_start: "", contract_end: "", client_email: "", client_password: "" };
   const [form, setForm] = useState(empty);
   const [enableClient, setEnableClient] = useState(false);
@@ -33,12 +35,37 @@ export default function Customers() {
     } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
 
+  const downloadTemplate = async () => {
+    const r = await api.get("/customers/import-template.csv", { responseType: "blob" });
+    const u = URL.createObjectURL(r.data);
+    const a = document.createElement("a"); a.href = u; a.download = "customers_template.csv"; a.click();
+    URL.revokeObjectURL(u);
+  };
+
+  const importCsv = async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const fd = new FormData(); fd.append("file", f);
+    try {
+      const { data } = await api.post("/customers/import-csv", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setImportResult(data);
+      toast.success(`${data.created} created, ${data.skipped} skipped, ${data.errors.length} errors`);
+      load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+    e.target.value = "";
+  };
+
   return (
     <div className="space-y-4" data-testid="customers-page">
       <div className="flex flex-col sm:flex-row justify-between gap-3">
         <div><h1 className="font-display text-3xl font-extrabold">Clients</h1><p className="text-muted-foreground text-sm">Manage customer accounts and contracts.</p></div>
         {can("customers", "create") && (
-          <Dialog open={open} onOpenChange={setOpen}>
+          <div className="flex gap-2 flex-wrap">
+            <Button variant="outline" onClick={downloadTemplate} data-testid="btn-csv-template"><Download className="w-4 h-4 mr-1" />CSV Template</Button>
+            <label className="cursor-pointer">
+              <Button asChild variant="outline"><span><Upload className="w-4 h-4 mr-1" />Import CSV</span></Button>
+              <input type="file" accept=".csv" className="hidden" onChange={importCsv} data-testid="btn-csv-import" />
+            </label>
+            <Dialog open={open} onOpenChange={setOpen}>
             <DialogTrigger asChild><Button data-testid="btn-add-customer" className="bg-primary text-primary-foreground"><Plus className="w-4 h-4 mr-1" /> Add Client</Button></DialogTrigger>
             <DialogContent className="max-w-lg">
               <DialogHeader><DialogTitle>New Client</DialogTitle></DialogHeader>
@@ -71,6 +98,7 @@ export default function Customers() {
               <Button onClick={create} className="bg-primary text-primary-foreground" data-testid="cust-save">Create</Button>
             </DialogContent>
           </Dialog>
+          </div>
         )}
       </div>
 

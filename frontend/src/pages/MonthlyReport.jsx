@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, Legend } from "recharts";
 import { toast } from "sonner";
-import { Download, Mail } from "lucide-react";
+import { Download, Mail, MessageCircle, FileSpreadsheet, Presentation } from "lucide-react";
 
 export default function MonthlyReport() {
   const [customers, setCustomers] = useState([]);
@@ -46,6 +46,24 @@ export default function MonthlyReport() {
     } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
 
+  const downloadFile = async (url, filename) => {
+    try {
+      const r = await api.get(url, { responseType: "blob" });
+      const u = URL.createObjectURL(r.data);
+      const a = document.createElement("a"); a.href = u; a.download = filename; a.click();
+      URL.revokeObjectURL(u);
+    } catch (e) { toast.error(e?.response?.data?.detail || "Download failed"); }
+  };
+
+  const sendWA = async () => {
+    const phone = data?.customer?.phone;
+    if (!phone) return toast.error("Klien tidak memiliki nomor WA");
+    try {
+      await api.post("/monthly-report/whatsapp", { customer_id: cid, month, body: {} });
+      toast.success(`WA terkirim ke ${phone}`);
+    } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+  };
+
   return (
     <div className="space-y-4" data-testid="monthly-page">
       <div>
@@ -67,7 +85,10 @@ export default function MonthlyReport() {
         </div>
         <Button onClick={generate} className="bg-primary text-primary-foreground" data-testid="mr-generate">Generate</Button>
         {data && <Button onClick={downloadPdf} variant="outline" data-testid="mr-pdf"><Download className="w-4 h-4 mr-1" />PDF</Button>}
+        {data && <Button onClick={() => downloadFile(`/monthly-report/excel?customer_id=${cid}&month=${month}`, `monthly-${month}.xlsx`)} variant="outline" data-testid="mr-excel"><FileSpreadsheet className="w-4 h-4 mr-1" />Excel</Button>}
+        {data && <Button onClick={() => downloadFile(`/monthly-report/pptx?customer_id=${cid}&month=${month}`, `monthly-${month}.pptx`)} variant="outline" data-testid="mr-pptx"><Presentation className="w-4 h-4 mr-1" />PPTX</Button>}
         {data && <Button onClick={() => { setEmail({ subject: `Monthly Report - ${month}`, message: "", override_recipient: data.customer?.email || "" }); setEmailOpen(true); }} className="bg-teal-600 hover:bg-teal-700 text-white" data-testid="mr-email"><Mail className="w-4 h-4 mr-1" />Send Email</Button>}
+        {data && <Button onClick={() => sendWA()} className="bg-emerald-600 hover:bg-emerald-700 text-white" data-testid="mr-wa"><MessageCircle className="w-4 h-4 mr-1" />Send WA</Button>}
       </Card>
 
       {data && (
