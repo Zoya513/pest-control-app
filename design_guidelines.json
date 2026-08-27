@@ -1,0 +1,126 @@
+{
+  "project_title": "PestOps Pro - Enterprise Pest Control Field Operations Management Platform",
+  "app_type": "hybrid_fullstack",
+  "locale": "id-ID / English (Enterprise Field Ops)",
+  "context_strategy": {
+    "primary_archetype": "THE PERFORMANCE PRO (Tactical Precision & Industrial Clarity)",
+    "target_audience": "Field Operations Directors, Dispatchers, Pest Control Technicians (Operators), Branch Managers",
+    "theme_mode": "dark_first_with_light_toggle",
+    "emotional_tone": "High-reliability tactical command center, field-ready, high contrast, clean & hygienic enterprise operations"
+  },
+  "typography": {
+    "font_family_headings": "Outfit, Plus Jakarta Sans, sans-serif",
+    "font_family_body": "DM Sans, Inter, sans-serif",
+    "font_family_mono": "JetBrains Mono, Source Code Pro, monospace",
+    "scale": {
+      "h1_hero": "text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight",
+      "h2_section": "text-xl sm:text-2xl lg:text-3xl font-bold tracking-tight",
+      "h3_card": "text-lg sm:text-xl font-semibold tracking-normal",
+      "h4_widget": "text-base sm:text-lg font-medium tracking-normal",
+      "body": "text-sm sm:text-base leading-relaxed",
+      "small_label": "text-xs font-mono uppercase tracking-wider"
+    },
+    "forbidden_fonts": ["Space Grotesk", "Comic Sans MS"]
+  },
+  "colors": {
+    "background_dark": "#0B0F17",
+    "surface_dark": "#111827",
+    "surface_dark_card": "#1F2937",
+    "surface_border_dark": "#374151",
+    "background_light": "#F8FAFC",
+    "surface_light": "#FFFFFF",
+    "surface_border_light": "#E2E8F0",
+    "brand_primary": "#10B981",
+    "brand_primary_hover": "#059669",
+    "brand_accent_teal": "#0EA5E9",
+    "alert_warning_amber": "#F59E0B",
+    "alert_danger_red": "#EF4444",
+    "alert_info_blue": "#3B82F6",
+    "status_badges": {
+      "belum_dikerjakan": "bg-amber-500/10 text-amber-500 border-amber-500/30",
+      "ditunda": "bg-red-500/10 text-red-400 border-red-500/30",
+      "selesai": "bg-emerald-500/10 text-emerald-400 border-emerald-500/30",
+      "aktif": "bg-teal-500/10 text-teal-400 border-teal-500/30"
+    },
+    "gps_indicator": {
+      "active": "bg-emerald-500 text-slate-950 animate-pulse",
+      "searching": "bg-amber-500 text-slate-950 animate-bounce",
+      "limited": "bg-orange-500 text-white",
+      "denied": "bg-red-600 text-white"
+    },
+    "forbidden_colors": ["#7351B7", "#1B93A4"]
+  },
+  "layout_and_spacing": {
+    "sidebar_navigation": {
+      "style": "Collapsible tactical left rail",
+      "items": [
+        {"id": "beranda", "label": "Beranda (Dashboard)", "icon": "LayoutDashboard"},
+        {"id": "tugas", "label": "Tugas (Work Orders)", "icon": "ClipboardList"},
+        {"id": "perjalanan", "label": "Perjalanan (Travel Logs)", "icon": "Navigation"},
+        {"id": "anggota", "label": "Anggota (Technicians)", "icon": "Users"},
+        {"id": "lokasi", "label": "Lokasi (Live Map)", "icon": "MapPin"},
+        {"id": "jadwal", "label": "Jadwal (Schedule Calendar)", "icon": "Calendar"},
+        {"id": "pelanggan", "label": "Pelanggan (Clients)", "icon": "Building2"},
+        {"id": "rencana", "label": "Rencana (Service Plans)", "icon": "Route"},
+        {"id": "service_report", "label": "Service Report", "icon": "FileCheck2"},
+        {"id": "cuti", "label": "Cuti (Leave Requests)", "icon": "Palmtree"},
+        {"id": "laporan", "label": "Laporan (Analytics & Export)", "icon": "BarChart3"},
+        {"id": "audit_log", "label": "Lainnya (Audit Trail & Settings)", "icon": "ShieldCheck"}
+      ]
+    },
+    "mobile_first_technician": {
+      "bottom_bar": true,
+      "touch_targets_min": "48px",
+      "card_padding": "p-4 sm:p-6",
+      "quick_actions": ["Check-In Camera", "Start Route GPS", "Fill Findings F/M/C/R/A/O", "Capture Signature"]
+    },
+    "bento_grid": {
+      "dashboard_mode": "High Density Grid (MODE B)",
+      "kpi_ratio": "col-span-12 sm:col-span-6 lg:col-span-3",
+      "chart_ratio": "col-span-12 lg:col-span-8",
+      "live_feed_ratio": "col-span-12 lg:col-span-4"
+    }
+  },
+  "pest_findings_table_schema": {
+    "categories": [
+      {"code": "F", "name": "Flies (Lalat)"},
+      {"code": "M", "name": "Mosquitoes (Nyamuk)"},
+      {"code": "C", "name": "Cockroaches (Kecoa)"},
+      {"code": "R", "name": "Rodents (Tikus)"},
+      {"code": "A", "name": "Ants (Semut)"},
+      {"code": "O", "name": "Others (Hama Lain)"}
+    ],
+    "fields_per_finding": ["Pest Category", "Location/Zone", "Infestation Level (Low/Med/High/Severe)", "Action Taken", "Chemical Used & Dosage", "Photo Attachment", "Recommendation"]
+  },
+  "key_features_design_requirements": {
+    "login_page": "Split screen or glass card layout featuring company logo, demo login preset triggers (Admin, Dispatcher, Field Technician), role badge, and secure authentication form.",
+    "gps_status_bar": "Persistent header badge displaying live GPS signal state (Active / Searching / Limited / Denied) with real-time heartbeat status indicator.",
+    "attendance_checkin": "Live Web Camera interface with face capture viewport, automatic geofence GPS verification indicator, check-in timestamp, and photo preview before submit.",
+    "service_report_signature": "HTML5 Canvas element for customer sign-off with clear/save triggers, offline queue status toggle, and PDF generator trigger.",
+    "live_map_tracking": "Leaflet map integration with active technician custom pins, status color codes, route replay animation toggle, and client site geofences.",
+    "reports_export": "Date range picker, technician filter, pest type filter, with instant PDF printable preview and Excel CSV generator."
+  },
+  "image_urls": {
+    "technician_fumigation": "https://images.pexels.com/photos/19789841/pexels-photo-19789841.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+    "technician_spraying": "https://images.pexels.com/photos/9246012/pexels-photo-9246012.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+    "technician_gear": "https://images.unsplash.com/photo-1691548970765-f8335acd7141?crop=entropy&cs=srgb&fm=jpg&q=85",
+    "avatar_male_tech": "https://images.pexels.com/photos/11792318/pexels-photo-11792318.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+    "avatar_crew": "https://images.pexels.com/photos/8942699/pexels-photo-8942699.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+    "company_logo_mark": "https://images.unsplash.com/photo-1649768870222-17848797d6b4?crop=entropy&cs=srgb&fm=jpg&q=85"
+  },
+  "component_guidelines": {
+    "buttons": "Pill-shaped or rounded-lg buttons with high contrast hover effects. Primary action: bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold.",
+    "cards": "Subtle border (border-slate-800 or border-slate-200), dark slate background, no harsh drop-shadows, p-5 padding minimum.",
+    "inputs": "Must use Shadcn Input, Select, and Checkbox wrapped with clear label typography and explicit hover/focus states.",
+    "toasts": "Sonner toast notifications with emerald border for success and red border for emergency dispatch alerts.",
+    "data_testid_rule": "ALL interactive components, buttons, inputs, tabs, map pins, and signature controls MUST carry explicit kebab-case data-testid attributes (e.g., data-testid='login-submit-button', data-testid='pest-findings-table', data-testid='attendance-checkin-btn')."
+  },
+  "instructions_to_main_agent": [
+    "Build a production-grade Pest Control Field Operations Management Platform with clean architecture and modular React frontend structure.",
+    "Implement clear Role-Based Access Control (Admin / Dispatcher / Field Technician) with instant switcher on login page.",
+    "Ensure the mobile view offers a dedicated bottom tab navigator for field operators (Today's Tasks, Attendance Camera, Service Report, GPS Route).",
+    "Implement pest findings F/M/C/R/A/O grid with interactive severity selector and chemical dosage calculator.",
+    "Ensure Leaflet maps and interactive canvas signature run smoothly with error boundary protection.",
+    "Ensure all user interactions feature responsive states, sonner notifications, and automated data simulation for real-time tracking."
+  ]
+}

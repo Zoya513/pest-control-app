@@ -1,0 +1,52 @@
+{
+  "summary": "Iteration 2 backend testing for PestOps Pro. Wrote /app/backend/tests/test_iteration2.py with 31 tests covering: 4-role logins (admin/tech/client/developer), tech/client permission maps, schedules mass-create (weekday filter), schedules CRUD, Nominatim geocode search/reverse, customer creation with linked client user (+ login), task filters (customer_id/date range), client-scoped tasks + client GPS-ping 403, attendance check-in with reverse-geocoded address + check-out with working_hours (verified check-in doc is updated with checkout_id/working_hours), service-report photos (documented duplicate-field bug), SR client_signature, SR listing filters, client-scoped SRs, bulk ZIP export (PK header + application/zip), monthly-report data (historical spans contract_start→target, SRs only from target month) + PDF, branding GET/PUT (dev allowed, tech 403), email endpoints (400 when no recipient; 200/502/500 accepted for provider). 30/31 pass. The 1 failure is an intentional assertion that exposes a real backend bug (see rca).",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/service-reports", "issue": "ServiceReportCreate model (server.py:171-181) declares `photos` TWICE — first as `List[SRPhoto]` (with captions), immediately overridden by `photos: List[str] = []`. Because Python class body assignments are last-write-wins, Pydantic v2 sees only `List[str]`. Sending [{path, caption}, ...] returns 422 (`string_type`), so the entire multi-photo-with-captions feature described in the requirements is non-functional. Reproduced with test test_photos_with_captions_bug. Fix: remove the duplicate legacy line 181.", "priority": "CRITICAL"}
+    ],
+    "minor": [
+      {"endpoint": "GET /api/tasks (& /api/service-reports, /api/schedules) with client role", "issue": "When role=client, backend sets query['customer_id'] = client.customer_id, but a subsequent `if customer_id:` overwrites it if the client passes a customer_id query param. In practice the client will still see nothing (query no longer matches their scope), but the scoping is bypassed. If the client passes their OWN customer_id it works; if they pass another customer_id, they see rows of that customer (only if any tasks/SRs exist there for them). Recommend: apply query param filter first, then hard-override with client's customer_id, or 403 if mismatched customer_id."},
+      {"endpoint": "PUT /api/customers/{cid}", "issue": "Uses CustomerCreate as body model — client_email/client_password can be passed to update but the code only creates a linked client user on POST. Also PUT overwrites ALL customer fields (no PATCH), and does not popped client_email/client_password before update, so those get stored on the customer doc."},
+      {"endpoint": "POST /api/attendance/checkin", "issue": "Uses `reverse_geocode()` which calls external Nominatim inside the request path — high latency + rate-limit exposure per check-in. Nominatim TOS also requires ≤1 req/s. Should be cached or moved to a background task."},
+      {"endpoint": "POST /api/schedules/mass-create", "issue": "No conflict/duplicate detection — running twice with same params silently creates 2× schedules. Also allows creating schedules on already-past dates. Consider dedupe by (customer_id, technician_id, date, start_time)."},
+      {"endpoint": "POST /api/monthly-report/email", "issue": "Signature `body: SendReportEmail = Body(...)` alongside two other `Body(...)` params — works only because clients pass a nested `body` object; this is inconsistent with /service-reports/{id}/email which uses SendReportEmail as top-level body. Confusing dual shape. Standardize."},
+      {"endpoint": "GET /api/branding", "issue": "No permission gate at all — any authenticated user can read branding. That's likely fine but should be explicit."},
+      {"endpoint": "PUT /api/branding", "issue": "Body is raw dict (no Pydantic model); any key from the request is persisted into settings doc, including malicious keys or the `updated_at` client can set. Add a strict BrandingUpdate model."},
+      {"endpoint": "General", "issue": "CORS still `allow_origins=['*']` + `allow_credentials=False` — httpOnly `access_token` cookie set at login cannot be used cross-origin (same finding as iteration 1)."},
+      {"endpoint": "General", "issue": "server.py grew to 1793 lines — should be split into routers (schedules, geocode, monthly_report, bulk_export, email, branding)."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iteration2.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/iter2_results.xml"
+  ],
+  "action_items": [
+    "CRITICAL: Remove the duplicate `photos: List[str] = []` line in ServiceReportCreate (server.py line 181). Keep only `photos: List[SRPhoto] = []` so captions are actually accepted. Also update the SR list-enrichment / PDF paths to handle the {path,caption} shape (bulk zip PDF + monthly PDF already handle dict shape, so they'll start receiving real data once schema is fixed).",
+    "Fix client-scope bypass: in list_tasks / list_sr / list_schedules, apply the query-param customer_id BEFORE the role-based override, or reject with 403 when client passes a customer_id that isn't theirs.",
+    "Add a strict BrandingUpdate Pydantic model for PUT /api/branding.",
+    "Standardize /api/monthly-report/email request shape (either full flat SendReportEmail or nested — pick one and document).",
+    "Consider adding rate-limiting / caching to geocode endpoints and to reverse_geocode() called on every checkin.",
+    "Split server.py into feature routers (approaching 1800 lines)."
+  ],
+  "critical_code_review_comments": [
+    "Duplicate Pydantic field `photos` in ServiceReportCreate silently disables the multi-photo-with-captions feature (root cause of the 1 failing test).",
+    "Client role scope override is not hard-enforced — passing `?customer_id=OTHER` is not blocked with a 403, only silently overwritten (partial isolation).",
+    "PUT /api/tasks and PUT /api/branding accept arbitrary raw dicts — no field validation. Any unknown key gets stored.",
+    "reverse_geocode() called synchronously (awaited) in every attendance check-in / check-out — introduces external-service latency and rate-limit dependency into hot path.",
+    "Nominatim proxy has no caching and passes user-supplied `q` directly — high risk of 429s in production.",
+    "server.py = 1793 lines; the iteration 1 comment about splitting into routers is now more urgent.",
+    "CORS remains allow_origins=['*'] + allow_credentials=False while login still writes httpOnly cookie — cookie flow unusable cross-origin (same as iter1)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration2.py (new)"
+  ],
+  "success_rate": {"backend": "97% (30/31, single failure is the intentional bug-exposure test for the duplicate `photos` field)", "frontend": "N/A"},
+  "test_credentials": "Admin: admin@pestops.com / Admin@123 ; Technician: technician@pestops.com / Tech@123 ; Client: client@pestops.com / Client@123 (linked to PT. John Robert Powers) ; Developer: developer@pestops.com / Dev@123 — all read from /app/memory/test_credentials.md.",
+  "seed_data_creation": "Fixtures create TEST_-prefixed customers, tasks and service reports (session-scoped, no explicit teardown — safe due to TEST_ prefix). test_new_client_can_login creates a real client user with a randomized 'test_client_<hex>@test.com' email; not cleaned up (small volume).",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Base URL from frontend/.env: https://pest-ops-field.preview.emergentagent.com. Two pytest files: /app/backend/tests/backend_test.py (iter1 regression, 23 tests) and /app/backend/tests/test_iteration2.py (iter2, 31 tests). Run both. JUnit at /app/test_reports/pytest/. The single failing test in iter2 (TestServiceReportPhotos::test_photos_with_captions_bug) will start passing automatically once the duplicate `photos` field in ServiceReportCreate is removed (server.py:181). No email actually sent because provider returned 502 (EMERGENT_EMAIL_KEY may be inactive) — test accepts 200/502/500 and passes on auth+ownership+400 path.",
+  "rca of the issue": "ServiceReportCreate (server.py lines 171-181) declares the field `photos` twice: first as `List[SRPhoto] = []` (the intended multi-photo+caption schema), then immediately as `photos: List[str] = []` labelled `legacy - kept for backward compat`. In Python/Pydantic, the second class attribute assignment wins, so the model's schema only recognizes list-of-strings. Any request sending [{'path': ..., 'caption': ...}, ...] is rejected with 422 `string_type`. This makes the entire multi-photo-with-captions requirement non-functional at the API layer. Reproduction: POST /api/service-reports with photos=[{path,caption}] as tech token → 422. Mitigation: delete line 181 of server.py so only the SRPhoto schema remains. The downstream `_generate_monthly_pdf` already expects the dict shape (checks `isinstance(p, dict) and p.get('path')`), so removing the duplicate should Just Work end-to-end."
+}
