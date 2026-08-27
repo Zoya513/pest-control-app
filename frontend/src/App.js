@@ -21,6 +21,7 @@ import MonthlyReport from "@/pages/MonthlyReport";
 import Branding from "@/pages/Branding";
 import AuditLog from "@/pages/AuditLog";
 import Settings from "@/pages/Settings";
+import EmailSettings from "@/pages/EmailSettings";
 import Profile from "@/pages/Profile";
 import Attendance from "@/pages/Attendance";
 import "leaflet/dist/leaflet.css";
@@ -60,6 +61,7 @@ function App() {
                 <Route path="branding" element={<Branding />} />
                 <Route path="audit-log" element={<AuditLog />} />
                 <Route path="settings" element={<Settings />} />
+                <Route path="email-settings" element={<EmailSettings />} />
                 <Route path="profile" element={<Profile />} />
               </Route>
             </Routes>

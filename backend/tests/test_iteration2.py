@@ -466,9 +466,14 @@ class TestMonthlyReport:
         d = r.json()
         assert d["customer"]["id"] == demo_customer["id"]
         assert d["month"] == "2026-02"
-        # historical spans from contract_start month (2026-01) through target (2026-02) = 2 entries
-        months = [h["month"] for h in d["historical_pest"]]
-        assert "2026-01" in months and "2026-02" in months, f"months got: {months}"
+        # NEW (iter4): historical spans from FIRST service_report.date (not contract_start).
+        # first_report_date field must be present.
+        assert "first_report_date" in d
+        # If the first SR for this customer is <= target month, historical must include target month
+        first_dt = d.get("first_report_date") or ""
+        if first_dt and first_dt[:7] <= "2026-02":
+            months = [h["month"] for h in d["historical_pest"]]
+            assert "2026-02" in months, f"months got: {months}, first_report_date={first_dt}"
         # service_reports only from target month
         for s in d["service_reports"]:
             assert s["date"].startswith("2026-02"), f"non-target month SR: {s['date']}"

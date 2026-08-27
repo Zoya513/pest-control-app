@@ -84,7 +84,7 @@ export default function MonthlyReport() {
           </Card>
 
           <Card className="p-5">
-            <div className="text-xs font-mono uppercase text-primary mb-3">Pest Findings — Historical (contract start → current)</div>
+            <div className="text-xs font-mono uppercase text-primary mb-3">Pest Findings — Historical (first report → current)</div>
             <ResponsiveContainer width="100%" height={300}>
               <BarChart data={data.historical_pest}>
                 <XAxis dataKey="month" tick={{ fontSize: 11 }} />

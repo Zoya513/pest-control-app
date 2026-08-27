@@ -1,0 +1,31 @@
+{
+  "summary": "Iteration 4 backend testing complete: created /app/backend/tests/test_iteration4.py with 21 tests covering reopen endpoint (admin/dev only, tech 403), SR create with service_treatments + photos w/ captions, SR PDF (application/pdf, %PDF magic), Monthly Report data.first_report_date field, Monthly Report PDF with include_srs=true merging (pypdf), Email Settings GET (password masked, smtp_password_set boolean), PUT (whitelist unknown keys, empty password does not overwrite existing), test-email endpoint (SMTP-fake falls back to Emergent Resend), cron endpoint (401 without Bearer, 401 wrong, 200 skipped when disabled, 200 queued when enabled with period YYYY-MM), reports filter enhancements (attendance month/user/customer, customers customer_id, employees role, employees pdf). Also re-ran full regression: backend_test.py (23) + test_iteration2.py (33) + test_iteration4.py (21) = 77/77 PASSED. Updated iter2 monthly data assertion to reflect new spec (historical anchored to first_report_date instead of contract_start).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iteration4.py",
+    "/app/backend/tests/test_iteration2.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/iter4.xml",
+    "/app/test_reports/pytest/iter4_full.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is now 2146 lines — >700-line limit exceeded. Recommend splitting into routers: /routers/tasks.py, /routers/service_reports.py, /routers/monthly_report.py, /routers/email.py, /routers/reports.py, /routers/cron.py.",
+    "monthly_report(): when first_sr.date > target month, historical_pest returns []. Consider always including target month row (even if zero) so the UI chart is not empty for early-month queries.",
+    "cron/auto-monthly-send: swallows individual customer failures inside asyncio.create_task job; consider persisting a job-run summary (success/failed counts) into an audit log for observability. Also asyncio.create_task inside a request lambda risks losing the coroutine reference on process shutdown — a proper background task queue (APScheduler already available since crons.yml exists, or arq) would be more reliable.",
+    "email-settings PUT: 'smtp_password: null' will pass the whitelist (not equal to '') and write null. Consider treating None the same as empty-string skip.",
+    "email-settings/test always returns 200 even on failure ({ok: false, error}). Consider returning 502 on hard failure so monitors can distinguish success from silent failure.",
+    "monthly_report_pdf pypdf import is wrapped in try/except ImportError — graceful degradation is good, but pypdf is in requirements.txt so this fallback would silently hide the SR merger being disabled. Log a warning at least."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration4.py",
+    "/app/backend/tests/test_iteration2.py"
+  ],
+  "success_rate": {"backend": "100% (77/77)", "frontend": "n/a"},
+  "test_credentials": "Admin admin@pestops.com/Admin@123; Tech technician@pestops.com/Tech@123; Client client@pestops.com/Client@123; Dev developer@pestops.com/Dev@123. WEBHOOK_CRON_SECRET=7f3e8c2d1a9b4e6f5c8d0a2b7e1f4c9d8b6a3e5f7c1d9b0a4e2f8c6d3b1a5e7f",
+  "seed_data_creation": "TEST_ prefixed tasks/SRs/customers created by fixtures (not auto-cleaned). Email settings cron flag reset to auto_monthly_send=False at end of cron enable test. Email settings SMTP host is left set to fake smtp.fake.invalid — fallback to Resend continues to work but consider cleanup script if isolation matters.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "77/77 total backend tests passing across 3 test files. Data pollution is present in DB across iterations (TEST_* records). If future tests depend on 'first service report date' for demo customer, note iter4 creates SRs on 2026-03-05..2026-03-10 and 2026-12-05 for TEST_reopen_admin. To test cron in enabled state again, remember to reset auto_monthly_send=False after."
+}

@@ -12,7 +12,7 @@ import {
 import {
   LayoutDashboard, ClipboardList, Users, MapPin, Navigation, Calendar,
   Building2, FileCheck2, BarChart3, ShieldCheck, LogOut, Bug, Palmtree,
-  Settings as SettingsIcon, Camera, Menu, X, Sun, Moon, Globe, Paintbrush, FileBarChart
+  Settings as SettingsIcon, Camera, Menu, X, Sun, Moon, Globe, Paintbrush, FileBarChart, Mail
 } from "lucide-react";
 
 function NAV_ITEMS(t) {
@@ -32,6 +32,7 @@ function NAV_ITEMS(t) {
     { to: "/branding", label: t("nav.branding"), icon: Paintbrush, mod: "branding" },
     { to: "/audit-log", label: t("nav.audit"), icon: ShieldCheck, mod: "audit_log" },
     { to: "/settings", label: t("nav.settings"), icon: SettingsIcon, mod: "settings" },
+    { to: "/email-settings", label: "Email Integration", icon: Mail, mod: "settings" },
   ];
 }
 

@@ -32,6 +32,7 @@ from reports import (
     generate_simple_pdf, generate_simple_excel
 )
 from emailer import send_email_with_attachments, render_report_email, EMAIL_FROM_NAME
+from smtp_sender import send_via_smtp, render_template, body_to_html, DEFAULT_SR_SUBJECT, DEFAULT_SR_BODY, DEFAULT_MR_SUBJECT, DEFAULT_MR_BODY
 import httpx
 import zipfile
 
@@ -168,6 +169,11 @@ class SRPhoto(BaseModel):
     caption: str = ""
 
 
+class SRTreatment(BaseModel):
+    name: str
+    area_description: str = ""
+
+
 class ServiceReportCreate(BaseModel):
     task_id: str
     pest_description: str = ""
@@ -175,9 +181,10 @@ class ServiceReportCreate(BaseModel):
     service_area: str = ""
     recommendation: str = ""
     pest_findings: List[PestFinding] = []
+    service_treatments: List[SRTreatment] = []
     technician_signature: Optional[str] = None  # storage path
     client_signature: Optional[str] = None
-    photos: List[SRPhoto] = []  # multi photos with captions
+    photos: List[SRPhoto] = []
 
 
 class LeaveCreate(BaseModel):
@@ -760,6 +767,28 @@ async def delete_task(tid: str, user: dict = Depends(get_current_user)):
     return {"ok": True}
 
 
+@api.post("/tasks/{tid}/reopen")
+async def reopen_task(tid: str, user: dict = Depends(get_current_user)):
+    """Admin or Developer can reopen a completed task — clears service_report_id
+    and reverts status so the technician can re-submit."""
+    if user.get("role") not in ("admin", "developer") and not has_permission(user, "tasks", "manage"):
+        raise HTTPException(403, "Only admin/developer can reopen tasks")
+    t = await db.tasks.find_one({"id": tid})
+    if not t:
+        raise HTTPException(404, "Not found")
+    # Optionally soft-delete the old SR so audit trail keeps it
+    if t.get("service_report_id"):
+        await db.service_reports.update_one({"id": t["service_report_id"]}, {"$set": {"status": "reopened", "reopened_at": now_iso()}})
+    await db.tasks.update_one({"id": tid}, {"$set": {
+        "service_report_id": None,
+        "check_out_at": None,
+        "status": "pending",
+        "updated_at": now_iso(),
+    }})
+    await audit(user, "REOPEN", "tasks", tid, {"prev_sr": t.get("service_report_id")}, None)
+    return {"ok": True}
+
+
 # ================= ATTENDANCE =================
 @api.post("/attendance/checkin")
 async def checkin(body: AttendanceCheckIn, user: dict = Depends(get_current_user)):
@@ -1069,7 +1098,41 @@ async def sr_pdf(sid: str, user: dict = Depends(get_current_user)):
     task = await db.tasks.find_one({"id": sr["task_id"]}, {"_id": 0}) or {}
     cust = await db.customers.find_one({"id": sr["customer_id"]}, {"_id": 0}) or {}
     tech = await db.users.find_one({"id": sr["technician_id"]}, {"_id": 0, "password_hash": 0}) or {}
-    pdf = generate_service_report_pdf(sr, task, cust, tech)
+    # Client scope check
+    if user.get("role") == "client" and user.get("customer_id") != sr["customer_id"]:
+        raise HTTPException(403, "Forbidden")
+    settings = await db.settings.find_one({"_id": "app"}) or {}
+    brand = {
+        "company_name": settings.get("company_name") or os.environ.get("COMPANY_NAME", "PestOps Pro"),
+        "company_address": settings.get("company_address") or os.environ.get("COMPANY_ADDRESS", ""),
+        "company_email": settings.get("company_email") or os.environ.get("COMPANY_EMAIL", ""),
+    }
+    if settings.get("logo_path"):
+        try:
+            data, _ = get_object(settings["logo_path"])
+            brand["logo_bytes"] = data
+        except Exception:
+            pass
+    # Fetch signatures + photos
+    sig_bytes = {"photos": []}
+    if sr.get("technician_signature"):
+        try:
+            sig_bytes["tech"], _ = get_object(sr["technician_signature"])
+        except Exception:
+            pass
+    if sr.get("client_signature"):
+        try:
+            sig_bytes["client"], _ = get_object(sr["client_signature"])
+        except Exception:
+            pass
+    for p in (sr.get("photos") or []):
+        if isinstance(p, dict) and p.get("path"):
+            try:
+                pb, _ = get_object(p["path"])
+                sig_bytes["photos"].append((pb, p.get("caption", "")))
+            except Exception:
+                pass
+    pdf = generate_service_report_pdf(sr, task, cust, tech, brand=brand, sig_bytes=sig_bytes)
     return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
                              headers={"Content-Disposition": f"attachment; filename={sr['report_number']}.pdf"})
 
@@ -1274,42 +1337,55 @@ async def dashboard(user: dict = Depends(get_current_user)):
 # ================= REPORTS =================
 @api.get("/reports/attendance")
 async def report_attendance(format: str = "excel", date_from: Optional[str] = None,
-                            date_to: Optional[str] = None, user_id: Optional[str] = None,
+                            date_to: Optional[str] = None, month: Optional[str] = None,
+                            user_id: Optional[str] = None, customer_id: Optional[str] = None,
                             user: dict = Depends(get_current_user)):
     require_permission(user, "reports", "export")
     q = {}
     if user_id:
         q["user_id"] = user_id
-    if date_from:
-        q["date"] = {"$gte": date_from}
-    if date_to:
-        q.setdefault("date", {})["$lte"] = date_to
-    att = await db.attendance.find(q, {"_id": 0}).sort("timestamp", 1).to_list(2000)
-    # Pair check-in with check-out
-    checkins = {a["id"]: a for a in att if a["type"] == "check_in"}
+    if month:
+        q["date"] = {"$regex": f"^{month}"}
+    else:
+        if date_from:
+            q["date"] = {"$gte": date_from}
+        if date_to:
+            q.setdefault("date", {})["$lte"] = date_to
+    if customer_id:
+        tasks_list = await db.tasks.find({"customer_id": customer_id}, {"_id": 0, "id": 1}).to_list(5000)
+        q["task_id"] = {"$in": [t["id"] for t in tasks_list]}
+    att = await db.attendance.find(q, {"_id": 0}).sort("timestamp", 1).to_list(5000)
+    cust_map = {c["id"]: c for c in await db.customers.find({}, {"_id": 0}).to_list(5000)}
+    task_map = {t["id"]: t for t in await db.tasks.find({}, {"_id": 0}).to_list(5000)}
     rows = []
     for a in att:
-        if a["type"] != "check_in":
+        if a.get("type") != "check_in":
             continue
         co = next((x for x in att if x.get("checkin_ref") == a["id"]), None)
-        wh = ""
-        if co:
+        wh = a.get("working_hours") or ""
+        if co and not wh:
             try:
-                d1 = datetime.fromisoformat(a["timestamp"])
-                d2 = datetime.fromisoformat(co["timestamp"])
-                wh = f"{(d2 - d1).total_seconds() / 3600:.2f}h"
+                d1 = datetime.fromisoformat(a["timestamp"]); d2 = datetime.fromisoformat(co["timestamp"])
+                wh = f"{(d2 - d1).total_seconds() / 3600:.2f}"
             except Exception:
                 pass
+        cust_name = ""
+        if a.get("task_id") and a["task_id"] in task_map:
+            cust_name = cust_map.get(task_map[a["task_id"]]["customer_id"], {}).get("company_name", "")
         rows.append([
-            a.get("user_name", ""),
+            a.get("user_name", ""), cust_name,
             a["date"], a["timestamp"][11:19],
-            co["date"] if co else "", (co["timestamp"][11:19] if co else ""),
-            wh,
-            f'{a.get("latitude", "")},{a.get("longitude", "")}',
+            a.get("address", "") or f"{a.get('latitude', '')},{a.get('longitude', '')}",
+            (co["date"] if co else ""), (co["timestamp"][11:19] if co else ""),
+            (co.get("address", "") if co else ""),
+            str(wh),
         ])
-    headers = ["Employee", "Check-in Date", "Check-in Time", "Check-out Date", "Check-out Time", "Working Hours", "Location"]
+    headers = ["Employee", "Client", "Check-in Date", "Check-in Time", "Check-in Location",
+               "Check-out Date", "Check-out Time", "Check-out Location", "Working Hours"]
+    settings = await db.settings.find_one({"_id": "app"}) or {}
+    brand = {"company_name": settings.get("company_name"), "company_address": settings.get("company_address"), "company_email": settings.get("company_email")}
     if format == "pdf":
-        b = generate_simple_pdf("ATTENDANCE REPORT", headers, rows)
+        b = generate_simple_pdf("ATTENDANCE REPORT", headers, rows, brand=brand)
         return StreamingResponse(io.BytesIO(b), media_type="application/pdf",
                                  headers={"Content-Disposition": "attachment; filename=attendance.pdf"})
     b = generate_simple_excel("Attendance", headers, rows)
@@ -1319,15 +1395,26 @@ async def report_attendance(format: str = "excel", date_from: Optional[str] = No
 
 
 @api.get("/reports/customers")
-async def report_customers(format: str = "excel", user: dict = Depends(get_current_user)):
+async def report_customers(format: str = "excel", date_from: Optional[str] = None,
+                           date_to: Optional[str] = None, customer_id: Optional[str] = None,
+                           user: dict = Depends(get_current_user)):
     require_permission(user, "reports", "export")
-    docs = await db.customers.find({}, {"_id": 0}).to_list(2000)
-    headers = ["Company", "Contact", "Phone", "Email", "Address", "Category", "Status", "Contract Start", "Contract End"]
-    rows = [[d.get("company_name", ""), d.get("contact_person", ""), d.get("phone", ""), d.get("email", ""),
-             d.get("address", ""), d.get("category", ""), d.get("status", ""),
-             d.get("contract_start") or "", d.get("contract_end") or ""] for d in docs]
+    q = {}
+    if customer_id:
+        q["id"] = customer_id
+    if date_from:
+        q["registration_date"] = {"$gte": date_from}
+    if date_to:
+        q.setdefault("registration_date", {})["$lte"] = date_to + "T23:59:59"
+    docs = await db.customers.find(q, {"_id": 0}).to_list(5000)
+    headers = ["Company", "Project", "Contact", "Phone", "Email", "Address", "Category", "Status", "Contract Start", "Contract End", "Registered"]
+    rows = [[d.get("company_name", ""), d.get("project_name", ""), d.get("contact_person", ""), d.get("phone", ""),
+             d.get("email", ""), d.get("address", ""), d.get("category", ""), d.get("status", ""),
+             d.get("contract_start") or "", d.get("contract_end") or "", (d.get("registration_date") or "")[:10]] for d in docs]
+    settings = await db.settings.find_one({"_id": "app"}) or {}
+    brand = {"company_name": settings.get("company_name"), "company_address": settings.get("company_address"), "company_email": settings.get("company_email")}
     if format == "pdf":
-        b = generate_simple_pdf("CUSTOMER REPORT", headers, rows)
+        b = generate_simple_pdf("CUSTOMER REPORT", headers, rows, brand=brand)
         return StreamingResponse(io.BytesIO(b), media_type="application/pdf",
                                  headers={"Content-Disposition": "attachment; filename=customers.pdf"})
     b = generate_simple_excel("Customers", headers, rows)
@@ -1337,15 +1424,29 @@ async def report_customers(format: str = "excel", user: dict = Depends(get_curre
 
 
 @api.get("/reports/employees")
-async def report_employees(format: str = "excel", user: dict = Depends(get_current_user)):
+async def report_employees(format: str = "excel", date_from: Optional[str] = None,
+                           date_to: Optional[str] = None, user_id: Optional[str] = None,
+                           role: Optional[str] = None, user: dict = Depends(get_current_user)):
     require_permission(user, "reports", "export")
-    docs = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(2000)
-    headers = ["Name", "Username/Email", "Position", "ID Number", "Address", "Join Date", "Status", "Leave Quota", "Remaining"]
-    rows = [[d.get("full_name", ""), d.get("email", ""), d.get("position", ""), d.get("id_number", ""),
-             d.get("address", ""), d.get("created_at", "")[:10], d.get("status", ""),
-             d.get("leave_quota", 0), max(0, d.get("leave_quota", 0) - d.get("leave_used", 0))] for d in docs]
+    q = {}
+    if user_id:
+        q["id"] = user_id
+    if role:
+        q["role"] = role
+    if date_from:
+        q["created_at"] = {"$gte": date_from}
+    if date_to:
+        q.setdefault("created_at", {})["$lte"] = date_to + "T23:59:59"
+    docs = await db.users.find(q, {"_id": 0, "password_hash": 0}).to_list(5000)
+    headers = ["Name", "Email", "Role", "Position", "Phone", "ID Number", "Address", "Join Date", "Status", "Leave Quota", "Remaining"]
+    rows = [[d.get("full_name", ""), d.get("email", ""), d.get("role", ""), d.get("position", ""),
+             d.get("phone", ""), d.get("id_number", ""), d.get("address", ""),
+             (d.get("created_at", "") or "")[:10], d.get("status", ""),
+             d.get("leave_quota", 0), max(0, (d.get("leave_quota", 0) or 0) - (d.get("leave_used", 0) or 0))] for d in docs]
+    settings = await db.settings.find_one({"_id": "app"}) or {}
+    brand = {"company_name": settings.get("company_name"), "company_address": settings.get("company_address"), "company_email": settings.get("company_email")}
     if format == "pdf":
-        b = generate_simple_pdf("EMPLOYEE DATA REPORT", headers, rows)
+        b = generate_simple_pdf("EMPLOYEE DATA REPORT", headers, rows, brand=brand)
         return StreamingResponse(io.BytesIO(b), media_type="application/pdf",
                                  headers={"Content-Disposition": "attachment; filename=employees.pdf"})
     b = generate_simple_excel("Employees", headers, rows)
@@ -1514,13 +1615,23 @@ async def monthly_report(customer_id: str, month: str, user: dict = Depends(get_
         raise HTTPException(404, "Customer not found")
     year, mon = month.split("-")
     m_prefix = f"{year}-{mon}"
-    # Contract start month for historical pest chart
-    contract_start = customer.get("contract_start") or "2026-01-01"
-    try:
-        cs = datetime.fromisoformat(contract_start).date().replace(day=1)
-    except Exception:
-        cs = date(2026, 1, 1)
     target = date(int(year), int(mon), 1)
+    # Historical anchor: FIRST service report ever for this customer (fallback to contract_start / target month)
+    first_sr = await db.service_reports.find_one({"customer_id": customer_id}, sort=[("date", 1)])
+    if first_sr and first_sr.get("date"):
+        try:
+            cs = datetime.fromisoformat(first_sr["date"]).date().replace(day=1)
+        except Exception:
+            cs = date(int(year), 1, 1)
+    else:
+        contract_start = customer.get("contract_start") or f"{year}-01-01"
+        try:
+            cs = datetime.fromisoformat(contract_start).date().replace(day=1)
+        except Exception:
+            cs = date(int(year), 1, 1)
+    # Ensure target month is always included even if there are no SRs yet
+    if cs > target:
+        cs = target
 
     # Historical pest per-month from contract_start → target
     historical = []
@@ -1555,7 +1666,8 @@ async def monthly_report(customer_id: str, month: str, user: dict = Depends(get_
     return {
         "customer": customer,
         "month": m_prefix,
-        "contract_start": contract_start,
+        "contract_start": customer.get("contract_start") or cs.isoformat(),
+        "first_report_date": (first_sr.get("date") if first_sr else None),
         "historical_pest": historical,
         "service_reports": srs,
         "tasks": tasks,
@@ -1656,17 +1768,59 @@ def _generate_monthly_pdf(payload: dict, brand: dict) -> bytes:
 
 
 @api.get("/monthly-report/pdf")
-async def monthly_report_pdf(customer_id: str, month: str, user: dict = Depends(get_current_user)):
+async def monthly_report_pdf(customer_id: str, month: str, include_srs: bool = True,
+                             user: dict = Depends(get_current_user)):
     require_permission(user, "monthly_reports", "export")
     payload = await monthly_report(customer_id=customer_id, month=month, user=user)
     settings = await db.settings.find_one({"_id": "app"}) or {}
     brand = {
         "company_name": settings.get("company_name") or os.environ.get("COMPANY_NAME", "PestOps Pro"),
         "company_address": settings.get("company_address") or os.environ.get("COMPANY_ADDRESS", ""),
+        "company_email": settings.get("company_email") or os.environ.get("COMPANY_EMAIL", ""),
     }
-    pdf = _generate_monthly_pdf(payload, brand)
-    return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
-                             headers={"Content-Disposition": f"attachment; filename=monthly-{customer_id[:8]}-{month}.pdf"})
+    if settings.get("logo_path"):
+        try:
+            data, _ = get_object(settings["logo_path"])
+            brand["logo_bytes"] = data
+        except Exception:
+            pass
+    mp = _generate_monthly_pdf(payload, brand)
+    if not include_srs or not payload["service_reports"]:
+        return StreamingResponse(io.BytesIO(mp), media_type="application/pdf",
+                                 headers={"Content-Disposition": f"attachment; filename=monthly-{customer_id[:8]}-{month}.pdf"})
+    # Merge monthly + each SR PDF using pypdf
+    try:
+        from pypdf import PdfWriter, PdfReader
+    except ImportError:
+        logger.warning("pypdf not installed — Monthly Report SR merge disabled, returning summary-only PDF")
+        return StreamingResponse(io.BytesIO(mp), media_type="application/pdf",
+                                 headers={"Content-Disposition": f"attachment; filename=monthly-{customer_id[:8]}-{month}.pdf"})
+    writer = PdfWriter()
+    writer.append(PdfReader(io.BytesIO(mp)))
+    for sr in payload["service_reports"]:
+        task = await db.tasks.find_one({"id": sr["task_id"]}, {"_id": 0}) or {}
+        cust = payload["customer"]
+        tech = await db.users.find_one({"id": sr["technician_id"]}, {"_id": 0, "password_hash": 0}) or {}
+        sig_bytes = {"photos": []}
+        if sr.get("technician_signature"):
+            try: sig_bytes["tech"], _ = get_object(sr["technician_signature"])
+            except Exception: pass
+        if sr.get("client_signature"):
+            try: sig_bytes["client"], _ = get_object(sr["client_signature"])
+            except Exception: pass
+        for p in (sr.get("photos") or []):
+            if isinstance(p, dict) and p.get("path"):
+                try:
+                    pb, _ = get_object(p["path"])
+                    sig_bytes["photos"].append((pb, p.get("caption", "")))
+                except Exception:
+                    pass
+        srpdf = generate_service_report_pdf(sr, task, cust, tech, brand=brand, sig_bytes=sig_bytes)
+        writer.append(PdfReader(io.BytesIO(srpdf)))
+    out = io.BytesIO()
+    writer.write(out)
+    return StreamingResponse(io.BytesIO(out.getvalue()), media_type="application/pdf",
+                             headers={"Content-Disposition": f"attachment; filename=monthly-{customer_id[:8]}-{month}-full.pdf"})
 
 
 # ================= BULK ZIP EXPORT =================
@@ -1710,6 +1864,111 @@ async def _get_brand():
     }
 
 
+async def _email_config() -> dict:
+    return await db.settings.find_one({"_id": "email"}) or {}
+
+
+def _mask_pw(cfg: dict) -> dict:
+    """Remove SMTP password from responses; expose only whether one is set."""
+    out = {k: v for k, v in cfg.items() if k not in ("_id", "smtp_password")}
+    out["smtp_password_set"] = bool(cfg.get("smtp_password"))
+    return out
+
+
+async def _smart_send(*, to: str, subject: str, plain_body: str, attachments: list = None):
+    """Try Custom SMTP first (if configured), else fallback to Emergent Resend."""
+    cfg = await _email_config()
+    brand = await _get_brand()
+    html = body_to_html(plain_body, signature=cfg.get("signature", ""))
+
+    smtp_host = cfg.get("smtp_host")
+    smtp_user = cfg.get("smtp_username")
+    smtp_pw = cfg.get("smtp_password")
+    from_addr = cfg.get("from_email")
+
+    if smtp_host and smtp_user and smtp_pw and from_addr:
+        try:
+            return await send_via_smtp(
+                host=smtp_host, port=int(cfg.get("smtp_port") or 587),
+                username=smtp_user, password=smtp_pw,
+                use_tls=bool(cfg.get("smtp_use_tls", True)),
+                from_addr=from_addr, from_name=cfg.get("from_name") or brand["company_name"],
+                to=to, subject=subject, html=html,
+                attachments=attachments or [],
+                reply_to=cfg.get("reply_to"),
+            )
+        except Exception as e:
+            logger.error(f"SMTP send failed, falling back to Resend: {e}")
+
+    # Fallback to Emergent Resend
+    return await send_email_with_attachments(
+        to=to, subject=subject, html=html,
+        attachments=attachments or [], reply_to=cfg.get("reply_to"),
+    )
+
+
+@api.get("/email-settings")
+async def get_email_settings(user: dict = Depends(get_current_user)):
+    if user.get("role") not in ("admin", "developer") and not has_permission(user, "settings", "manage"):
+        raise HTTPException(403, "Forbidden")
+    cfg = await _email_config()
+    cfg.setdefault("smtp_host", "")
+    cfg.setdefault("smtp_port", 587)
+    cfg.setdefault("smtp_username", "")
+    cfg.setdefault("smtp_use_tls", True)
+    cfg.setdefault("from_email", "")
+    cfg.setdefault("from_name", "")
+    cfg.setdefault("reply_to", "")
+    cfg.setdefault("signature", "")
+    cfg.setdefault("sr_subject_template", DEFAULT_SR_SUBJECT)
+    cfg.setdefault("sr_body_template", DEFAULT_SR_BODY)
+    cfg.setdefault("mr_subject_template", DEFAULT_MR_SUBJECT)
+    cfg.setdefault("mr_body_template", DEFAULT_MR_BODY)
+    cfg.setdefault("auto_monthly_send", False)
+    cfg.setdefault("auto_monthly_day", 1)  # send on 1st of month
+    return _mask_pw(cfg)
+
+
+@api.put("/email-settings")
+async def put_email_settings(body: dict = Body(...), user: dict = Depends(get_current_user)):
+    if user.get("role") not in ("admin", "developer") and not has_permission(user, "settings", "manage"):
+        raise HTTPException(403, "Forbidden")
+    # Whitelist keys (no arbitrary fields)
+    ALLOWED = {"smtp_host", "smtp_port", "smtp_username", "smtp_password", "smtp_use_tls",
+               "from_email", "from_name", "reply_to", "signature",
+               "sr_subject_template", "sr_body_template",
+               "mr_subject_template", "mr_body_template",
+               "auto_monthly_send", "auto_monthly_day"}
+    upd = {k: v for k, v in body.items() if k in ALLOWED}
+    # Don't overwrite password with empty string or None (keep existing)
+    if "smtp_password" in upd and (upd["smtp_password"] in ("", None)):
+        upd.pop("smtp_password")
+    upd["updated_at"] = now_iso()
+    await db.settings.update_one({"_id": "email"}, {"$set": upd}, upsert=True)
+    await audit(user, "UPDATE", "settings", "email", None, {k: v for k, v in upd.items() if k != "smtp_password"})
+    return await get_email_settings(user)
+
+
+@api.post("/email-settings/test")
+async def test_email(body: dict = Body(...), user: dict = Depends(get_current_user)):
+    if user.get("role") not in ("admin", "developer"):
+        raise HTTPException(403, "Forbidden")
+    to = body.get("to") or user.get("email")
+    if not to:
+        raise HTTPException(400, "No recipient")
+    brand = await _get_brand()
+    plain = f"This is a test email from {brand['company_name']} — PestOps Pro platform.\n\nIf you received this, your email integration is working correctly.\n\nSent by: {user.get('full_name')}"
+    try:
+        sent = await _smart_send(to=to, subject=f"Test Email — {brand['company_name']}",
+                                 plain_body=plain, attachments=[])
+        return {"ok": True, "sent_via": sent}
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Hard failure — return 502 so monitors can distinguish
+        raise HTTPException(status_code=502, detail=f"Email send failed: {str(e)}")
+
+
 @api.post("/service-reports/{sid}/email")
 async def email_single_sr(sid: str, body: SendReportEmail, user: dict = Depends(get_current_user)):
     require_permission(user, "email", "create")
@@ -1722,20 +1981,46 @@ async def email_single_sr(sid: str, body: SendReportEmail, user: dict = Depends(
         raise HTTPException(400, "No client email available")
     task = await db.tasks.find_one({"id": sr["task_id"]}, {"_id": 0}) or {}
     tech = await db.users.find_one({"id": sr["technician_id"]}, {"_id": 0, "password_hash": 0}) or {}
-    pdf = generate_service_report_pdf(sr, task, cust, tech)
     brand = await _get_brand()
-    html = render_report_email(
-        brand_name=brand["company_name"], brand_address=brand["company_address"],
-        recipient_name=cust.get("contact_person") or cust.get("company_name", ""),
-        client_name=cust.get("company_name", ""), period=sr.get("date", ""),
-        admin_message=body.message, report_kind="Service Report",
-    )
-    email_id = await send_email_with_attachments(
-        to=recipient, subject=body.subject or f"Service Report - {sr.get('report_number','')}",
-        html=html, attachments=[{"filename": f"{sr.get('report_number','report')}.pdf", "content": pdf}],
-    )
-    await audit(user, "EMAIL", "service_reports", sid, None, {"to": recipient, "email_id": email_id})
-    return {"ok": True, "email_id": email_id, "recipient": recipient}
+    settings = await db.settings.find_one({"_id": "app"}) or {}
+    brand_full = {**brand, "company_email": settings.get("company_email")}
+    if settings.get("logo_path"):
+        try:
+            data, _ = get_object(settings["logo_path"])
+            brand_full["logo_bytes"] = data
+        except Exception:
+            pass
+    # Signatures + photos
+    sig_bytes = {"photos": []}
+    if sr.get("technician_signature"):
+        try: sig_bytes["tech"], _ = get_object(sr["technician_signature"])
+        except Exception: pass
+    if sr.get("client_signature"):
+        try: sig_bytes["client"], _ = get_object(sr["client_signature"])
+        except Exception: pass
+    for p in (sr.get("photos") or []):
+        if isinstance(p, dict) and p.get("path"):
+            try:
+                pb, _ = get_object(p["path"])
+                sig_bytes["photos"].append((pb, p.get("caption", "")))
+            except Exception:
+                pass
+    pdf = generate_service_report_pdf(sr, task, cust, tech, brand=brand_full, sig_bytes=sig_bytes)
+    # Templates
+    cfg = await _email_config()
+    ctx = {
+        "report_number": sr.get("report_number", ""),
+        "client_name": cust.get("company_name", ""),
+        "period": sr.get("date", ""),
+        "company_name": brand["company_name"],
+        "technician": tech.get("full_name", ""),
+    }
+    subject = body.subject or render_template(cfg.get("sr_subject_template", DEFAULT_SR_SUBJECT), **ctx)
+    plain = body.message or render_template(cfg.get("sr_body_template", DEFAULT_SR_BODY), **ctx)
+    sent = await _smart_send(to=recipient, subject=subject, plain_body=plain,
+                             attachments=[{"filename": f"{sr.get('report_number', 'report')}.pdf", "content": pdf}])
+    await audit(user, "EMAIL", "service_reports", sid, None, {"to": recipient, "sent_via": sent})
+    return {"ok": True, "sent_via": sent, "recipient": recipient}
 
 
 @api.post("/monthly-report/email")
@@ -1748,22 +2033,83 @@ async def email_monthly_report(customer_id: str = Body(...), month: str = Body(.
     if not recipient:
         raise HTTPException(400, "No client email available")
     brand = await _get_brand()
-    pdf = _generate_monthly_pdf(payload, brand)
-    html = render_report_email(
-        brand_name=brand["company_name"], brand_address=brand["company_address"],
-        recipient_name=cust.get("contact_person") or cust.get("company_name", ""),
-        client_name=cust.get("company_name", ""), period=month,
-        admin_message=body.message, report_kind="Monthly Report",
-    )
-    email_id = await send_email_with_attachments(
-        to=recipient, subject=body.subject or f"Monthly Report - {month}",
-        html=html, attachments=[{"filename": f"monthly-{month}.pdf", "content": pdf}],
-    )
-    await audit(user, "EMAIL", "monthly_reports", f"{customer_id}-{month}", None, {"to": recipient, "email_id": email_id})
-    return {"ok": True, "email_id": email_id, "recipient": recipient}
+    settings = await db.settings.find_one({"_id": "app"}) or {}
+    brand_full = {**brand, "company_email": settings.get("company_email")}
+    if settings.get("logo_path"):
+        try:
+            data, _ = get_object(settings["logo_path"])
+            brand_full["logo_bytes"] = data
+        except Exception:
+            pass
+    pdf = _generate_monthly_pdf(payload, brand_full)
+    cfg = await _email_config()
+    ctx = {"client_name": cust.get("company_name", ""), "period": month, "company_name": brand["company_name"]}
+    subject = body.subject or render_template(cfg.get("mr_subject_template", DEFAULT_MR_SUBJECT), **ctx)
+    plain = body.message or render_template(cfg.get("mr_body_template", DEFAULT_MR_BODY), **ctx)
+    sent = await _smart_send(to=recipient, subject=subject, plain_body=plain,
+                             attachments=[{"filename": f"monthly-{month}.pdf", "content": pdf}])
+    await audit(user, "EMAIL", "monthly_reports", f"{customer_id}-{month}", None, {"to": recipient, "sent_via": sent})
+    return {"ok": True, "sent_via": sent, "recipient": recipient}
 
 
-# ================= BRANDING =================
+@api.post("/cron/auto-monthly-send")
+async def cron_auto_monthly(request: Request):
+    # Cron endpoints must ack 2xx immediately; enqueue/background the actual work.
+    auth = request.headers.get("Authorization", "")
+    expected = f"Bearer {os.environ.get('WEBHOOK_CRON_SECRET', '')}"
+    if not expected.endswith(" ") and auth != expected:
+        raise HTTPException(401, "Unauthorized")
+    cfg = await _email_config()
+    if not cfg.get("auto_monthly_send"):
+        return {"ok": True, "skipped": "auto_monthly_send disabled"}
+    # Compute previous month
+    today = date.today()
+    if today.month == 1:
+        prev_year, prev_month = today.year - 1, 12
+    else:
+        prev_year, prev_month = today.year, today.month - 1
+    period = f"{prev_year:04d}-{prev_month:02d}"
+    # Iterate active customers with email set — enqueue async, respond fast
+    import asyncio
+
+    async def _job():
+        customers = await db.customers.find({"status": "active", "email": {"$nin": ["", None]}}, {"_id": 0}).to_list(500)
+        for c in customers:
+            try:
+                # Reuse email endpoint logic by simulating "admin"
+                admin = await db.users.find_one({"role": "admin"}, {"_id": 0, "password_hash": 0})
+                if not admin:
+                    continue
+                payload = await monthly_report(customer_id=c["id"], month=period, user=admin)
+                brand = await _get_brand()
+                settings = await db.settings.find_one({"_id": "app"}) or {}
+                brand_full = {**brand, "company_email": settings.get("company_email")}
+                if settings.get("logo_path"):
+                    try:
+                        data, _ = get_object(settings["logo_path"])
+                        brand_full["logo_bytes"] = data
+                    except Exception:
+                        pass
+                pdf = _generate_monthly_pdf(payload, brand_full)
+                ctx = {"client_name": c.get("company_name", ""), "period": period, "company_name": brand["company_name"]}
+                subject = render_template(cfg.get("mr_subject_template", DEFAULT_MR_SUBJECT), **ctx)
+                plain = render_template(cfg.get("mr_body_template", DEFAULT_MR_BODY), **ctx)
+                await _smart_send(to=c["email"], subject=subject, plain_body=plain,
+                                  attachments=[{"filename": f"monthly-{period}.pdf", "content": pdf}])
+                await db.audit_logs.insert_one({
+                    "id": uid(), "user_id": "cron", "user_name": "Scheduler",
+                    "action": "AUTO_EMAIL", "module": "monthly_reports",
+                    "record_id": f"{c['id']}-{period}", "new_value": {"to": c["email"]},
+                    "timestamp": now_iso(),
+                })
+            except Exception as e:
+                logger.exception(f"auto-monthly-send for {c.get('company_name')}: {e}")
+
+    asyncio.create_task(_job())
+    return {"ok": True, "period": period, "status": "queued"}
+
+
+
 @api.get("/branding")
 async def get_branding(user: dict = Depends(get_current_user)):
     s = await db.settings.find_one({"_id": "app"}) or {}

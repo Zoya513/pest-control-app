@@ -1,0 +1,8 @@
+crons:
+  - name: auto-monthly-report
+    description: "Sends Monthly Reports to all active clients on the 1st of every month at 8am"
+    cron: "0 8 1 * *"
+    endpoint: "{{BASE_URL}}/api/cron/auto-monthly-send"
+    method: POST
+    # Cron endpoints must ack 2xx immediately; enqueue/background the actual work.
+    enabled: true
